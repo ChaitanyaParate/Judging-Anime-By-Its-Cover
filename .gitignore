@@ -1,3 +1,48 @@
+# ── Large data & model files ──────────────────────────────────────────────────
+# Cover images (2.6 GB) — download via mal_scraper.py
 covers/
+
+# CLIP model weights (578 MB) — download via download_model.py
+models/
+
+# Pre-computed CLIP embeddings (59 MB) — generated via embed_covers.py
+cover_embeddings.npy
+embedding_index.json
+
+# SQLite database (8 MB) — generated via mal_scraper.py
+anime_data.db
+
+# ── Output & logs ─────────────────────────────────────────────────────────────
+results/
 plots/
+*.log
+
+# ── Python environment ────────────────────────────────────────────────────────
 venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Secrets & personal data ───────────────────────────────────────────────────
+.env
+*.key
+# User anime lists (personal data — commit your own copy intentionally)
+# Ani.csv
