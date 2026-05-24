@@ -46,4 +46,4 @@ Thumbs.db
 .env
 *.key
 # User anime lists (personal data — commit your own copy intentionally)
-# Ani.csv
+Ani.csv
