@@ -11,6 +11,7 @@ Loads precomputed CLIP embeddings and performs:
 
 import os
 import json
+import math
 import sqlite3
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ from input_parser import AnimeEntry
 DB_PATH = "anime_data.db"
 EMBEDDINGS_PATH = "cover_embeddings.npy"
 INDEX_PATH = "embedding_index.json"
+GENRE_CORR_PATH = "genre_correlation.json"  # cached co-occurrence table
 # Local model path — download once with: python download_model.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
 
@@ -45,6 +47,18 @@ MIN_SCORED_BY = 500
 # MMR diversity weight (0 = pure relevance, 1 = pure diversity)
 # 0.40 means: 60% relevance + 40% penalise similarity to already-picked results
 MMR_LAMBDA = 0.40
+
+# Genre relevance threshold: anime scoring below this after normalization
+# get a hard-zero genre contribution (filters out weakly-correlated anime).
+# 0.13 cuts off pure Drama/Romance anime (Toradora! scores ~0.12 for Psychological)
+# while keeping Action/Supernatural anime with genuine thematic alignment.
+GENRE_THRESHOLD = 0.13
+
+# Demographic genres need REVERSED correlation direction.
+# For Josei/Seinen/Shounen/Shoujo/Kids the table has P(G | Demographic), but
+# we need P(Demographic | G) so that Drama anime don't score high for "Josei".
+DEMOGRAPHIC_GENRES = {"Josei", "Seinen", "Shoujo", "Shounen", "Kids"}
+
 
 
 # ── Lazy CLIP loader ──────────────────────────────────────────────────────────
@@ -115,7 +129,32 @@ def _build_genre_correlation() -> dict:
 
     print(f"[recommender] Genre correlation table: {len(genre_count)} genres, "
           f"{len(corr)} correlated pairs (min_co={MIN_CO})")
+
+    # Persist to disk: JSON with "G1|G2" keys so it's human-readable
+    serialisable = {f"{g1}|{g2}": v for (g1, g2), v in corr.items()}
+    with open(GENRE_CORR_PATH, "w") as f:
+        json.dump(serialisable, f, indent=2, sort_keys=True)
+    print(f"[recommender] Saved genre correlation → {GENRE_CORR_PATH}")
+
     return corr
+
+
+def _load_genre_corr() -> dict:
+    """Load genre correlation from cache file if fresh, else rebuild from DB."""
+    db_mtime = os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0
+    cache_mtime = os.path.getmtime(GENRE_CORR_PATH) if os.path.exists(GENRE_CORR_PATH) else 0
+
+    if cache_mtime >= db_mtime and os.path.exists(GENRE_CORR_PATH):
+        with open(GENRE_CORR_PATH, "r") as f:
+            raw = json.load(f)
+        corr = {tuple(k.split("|", 1)): v for k, v in raw.items()}
+        pairs = len(corr)
+        genres = len({g for g, _ in corr})
+        print(f"[recommender] Loaded genre correlation from cache: {genres} genres, {pairs} pairs")
+        return corr
+
+    # Cache missing or DB updated — rebuild
+    return _build_genre_correlation()
 
 
 def _load_index():
@@ -134,7 +173,7 @@ def _load_index():
     with open(INDEX_PATH, "r") as f:
         _index = json.load(f)  # {str(mal_id): row_idx}
     _reverse_index = {v: int(k) for k, v in _index.items()}
-    _genre_corr = _build_genre_correlation()
+    _genre_corr = _load_genre_corr()  # load from cache or rebuild
     print(f"[recommender] Loaded {_embeddings_matrix.shape[0]} embeddings from index.")
 
 
@@ -303,6 +342,31 @@ def recommend(
 
     top_candidate_idxs = np.argsort(masked_sims)[::-1][:n_candidates]
 
+    # ── 5b. Genre-seeded candidate injection ──────────────────────────────────
+    # When a genre filter is active, actual genre-tagged anime may not appear in
+    # the top-N visual candidates (e.g., Josei anime look different from Shounen).
+    # Inject ALL passing anime that have the exact genre tag into the pool so they
+    # get a fair chance at ranking via their genre_relevance score.
+    injected_idxs: set[int] = set()
+    if genre_filter and anime_db:
+        # Build set of row_idxs already in the visual candidate pool
+        existing_pool = set(top_candidate_idxs.tolist())
+        for mid, info in anime_db.items():
+            if mid in liked_ids:
+                continue
+            if info["score"] < MIN_SCORE or info["scored_by"] < MIN_SCORED_BY:
+                continue
+            if not info["genres"]:
+                continue
+            anime_tags = {g.strip() for g in info["genres"].split(",") if g.strip()}
+            if anime_tags & genre_filter:  # exact tag overlap
+                row_idx = _index.get(str(mid))
+                if row_idx is not None and row_idx not in existing_pool:
+                    injected_idxs.add(row_idx)
+
+    # Merge: visual candidates + genre injections (order: visual first)
+    all_candidate_idxs = list(top_candidate_idxs) + list(injected_idxs)
+
     # ── 6. Normalise MAL score and members for re-ranking ─────────────────────
     all_scores = np.array([anime_db[mid]["score"] for mid in anime_db if anime_db[mid]["score"] > 0])
     score_min, score_max = all_scores.min(), all_scores.max()
@@ -313,7 +377,7 @@ def recommend(
 
     # ── 7. Re-rank with metadata ──────────────────────────────────────────────
     candidates = []
-    for row_idx in top_candidate_idxs:
+    for row_idx in all_candidate_idxs:
         mal_id = _reverse_index.get(row_idx)
         if mal_id is None or mal_id not in anime_db:
             continue
@@ -326,22 +390,51 @@ def recommend(
         if info["scored_by"] < MIN_SCORED_BY:
             continue
 
-        # Genre relevance: soft co-occurrence correlation score (0 → 1)
-        # For each requested genre F, find the best-correlated genre G in this
-        # anime's tag list: corr[(G, F)] = P(G | F) from the 30k anime DB.
-        # → Anime with semantically related genres score high even without exact match.
+        # Genre relevance: sum all genre correlations, normalize, apply threshold
+        #
+        # Two correlation directions depending on whether the requested genre is a
+        # demographic (Josei, Seinen, Shounen, Shoujo, Kids):
+        #
+        #  Regular genres  → P(anime_genre | req_genre)
+        #    "If I want Horror, how likely is this anime's genre to co-occur?"
+        #    e.g. corr[(Action, Horror)] = 0.285
+        #
+        #  Demographic genres → P(req_genre | anime_genre)   [REVERSED]
+        #    "Given this anime has Drama, how likely is it to be Josei?"
+        #    e.g. corr[(Josei, Drama)] = 0.013 → Toradora! scores ~0.036 → zeroed
+        #    Actual Josei anime: corr[(Josei, Josei)] = 1.0 → strong boost
         genre_relevance = 0.0
         if genre_filter and info["genres"] and _genre_corr is not None:
-            anime_genres = {g.strip() for g in info["genres"].split(",")}
-            per_req: list[float] = []
-            for req_genre in genre_filter:
-                # Best soft-match score for this requested genre from any of the anime's tags
-                best = max(
-                    (_genre_corr.get((ag, req_genre), 0.0) for ag in anime_genres),
-                    default=0.0,
-                )
-                per_req.append(best)
-            genre_relevance = sum(per_req) / len(genre_filter)  # avg across requested genres
+            anime_genres = [g.strip() for g in info["genres"].split(",") if g.strip()]
+            if anime_genres:
+                per_req: list[float] = []
+                for req_genre in genre_filter:
+                    if req_genre in DEMOGRAPHIC_GENRES:
+                        # Reversed: P(req_genre | anime_genre)
+                        total_corr = sum(
+                            _genre_corr.get((req_genre, ag), 0.0) for ag in anime_genres
+                        )
+                    else:
+                        # Standard: P(anime_genre | req_genre)
+                        total_corr = sum(
+                            _genre_corr.get((ag, req_genre), 0.0) for ag in anime_genres
+                        )
+                    # Normalize: divide by genre count (max possible = 1.0 per genre)
+                    per_req.append(total_corr / len(anime_genres))
+                # Multi-genre aggregation: geometric mean.
+                # Penalises imbalanced scores more than arithmetic mean but less than min.
+                # Examples for "Romance Horror":
+                #   Toradora! (0.50, 0.02) → geomean = 0.10 < 0.13 → zeroed ✓
+                #   Bakemonogatari (0.29, 0.19) → geomean = 0.23 → passes ✓
+                # Examples for "Isekai Horror":
+                #   Overlord (0.70, 0.10) → geomean = 0.26 → passes ✓  (min would zero it)
+                #   Toradora! (0.05, 0.04) → geomean = 0.045 → zeroed ✓
+                if len(per_req) > 1:
+                    log_sum = sum(math.log(max(s, 1e-9)) for s in per_req)
+                    raw = math.exp(log_sum / len(per_req))
+                else:
+                    raw = per_req[0]
+                genre_relevance = raw if raw >= GENRE_THRESHOLD else 0.0
 
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range

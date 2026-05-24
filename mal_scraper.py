@@ -5,6 +5,7 @@ import os
 import argparse
 import time
 from tqdm.asyncio import tqdm
+from recommender import _build_genre_correlation
 
 DB_NAME = "anime_data.db"
 COVERS_DIR = "covers"
@@ -88,6 +89,9 @@ async def scrape_metadata():
 
     conn.close()
     print("Metadata scraping complete.")
+    print("Rebuilding genre correlation table...")
+    _build_genre_correlation()
+    print("Genre correlation updated.")
 
 def process_page_data(anime_list, cursor, conn):
     for anime in anime_list:
