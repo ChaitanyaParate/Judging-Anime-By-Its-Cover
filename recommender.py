@@ -68,14 +68,58 @@ def _get_clip():
     return _clip_model, _clip_processor, _device
 
 
-# ── Embedding index ───────────────────────────────────────────────────────────
+# ── Embedding index & genre correlation ─────────────────────────────────────
 _embeddings_matrix: np.ndarray | None = None
 _index: dict | None = None
 _reverse_index: dict | None = None  # row_idx → mal_id
+_genre_corr: dict | None = None     # (anime_genre, requested_genre) → float 0-1
+
+
+def _build_genre_correlation() -> dict:
+    """Build a soft genre correlation table from co-occurrence in the anime DB.
+
+    Returns corr[(G, F)] = P(G | F) = fraction of anime tagged F that are also
+    tagged G.  Self-correlation is always 1.0.  Pairs with < MIN_CO occurrences
+    are treated as 0.0 to avoid noise from rare genres.
+
+    Usage in scoring:
+        genre_relevance = mean over F in genre_filter of:
+            max over G in anime_genres of corr.get((G, F), 0.0)
+    """
+    import sqlite3 as _sq
+    from collections import defaultdict
+
+    MIN_CO = 5  # minimum co-occurrences to record a correlation
+
+    conn = _sq.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT genres FROM anime WHERE genres IS NOT NULL AND genres != ''")
+    rows = c.fetchall()
+    conn.close()
+
+    genre_count: dict[str, int] = defaultdict(int)
+    co_count: dict[tuple[str, str], int] = defaultdict(int)
+
+    for (genres_str,) in rows:
+        tags = [g.strip() for g in genres_str.split(",") if g.strip()]
+        for t in tags:
+            genre_count[t] += 1
+        for g1 in tags:
+            for g2 in tags:  # g2 = the "requested" genre, g1 = anime's genre
+                co_count[(g1, g2)] += 1
+
+    corr: dict[tuple[str, str], float] = {}
+    for (g1, g2), count in co_count.items():
+        if count >= MIN_CO and genre_count[g2] > 0:
+            corr[(g1, g2)] = count / genre_count[g2]  # P(g1 | g2), max 1.0 for self
+
+    print(f"[recommender] Genre correlation table: {len(genre_count)} genres, "
+          f"{len(corr)} correlated pairs (min_co={MIN_CO})")
+    return corr
 
 
 def _load_index():
-    global _embeddings_matrix, _index, _reverse_index
+    global _embeddings_matrix, _index, _reverse_index, _genre_corr
     if _embeddings_matrix is not None:
         return
 
@@ -90,6 +134,7 @@ def _load_index():
     with open(INDEX_PATH, "r") as f:
         _index = json.load(f)  # {str(mal_id): row_idx}
     _reverse_index = {v: int(k) for k, v in _index.items()}
+    _genre_corr = _build_genre_correlation()
     print(f"[recommender] Loaded {_embeddings_matrix.shape[0]} embeddings from index.")
 
 
@@ -281,14 +326,22 @@ def recommend(
         if info["scored_by"] < MIN_SCORED_BY:
             continue
 
-        # Genre relevance: normalized 0→1 score
-        # = matched_genres / requested_genres
-        # Toradora! for 'horror' →0.0, BTOOOM! for 'survival' →0.33, full match →1.0
+        # Genre relevance: soft co-occurrence correlation score (0 → 1)
+        # For each requested genre F, find the best-correlated genre G in this
+        # anime's tag list: corr[(G, F)] = P(G | F) from the 30k anime DB.
+        # → Anime with semantically related genres score high even without exact match.
         genre_relevance = 0.0
-        if genre_filter and info["genres"]:
+        if genre_filter and info["genres"] and _genre_corr is not None:
             anime_genres = {g.strip() for g in info["genres"].split(",")}
-            overlap = len(anime_genres & genre_filter)
-            genre_relevance = overlap / len(genre_filter)  # 0.0 to 1.0
+            per_req: list[float] = []
+            for req_genre in genre_filter:
+                # Best soft-match score for this requested genre from any of the anime's tags
+                best = max(
+                    (_genre_corr.get((ag, req_genre), 0.0) for ag in anime_genres),
+                    default=0.0,
+                )
+                per_req.append(best)
+            genre_relevance = sum(per_req) / len(genre_filter)  # avg across requested genres
 
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range
