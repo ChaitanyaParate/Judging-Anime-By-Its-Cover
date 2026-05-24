@@ -63,6 +63,14 @@ ALIAS_TO_MAL_ID: dict[str, int] = {
 
 
 
+# Worth Level → numeric weight mapping
+WORTH_WEIGHTS: dict[str, float] = {
+    "high": 1.5,
+    "medium": 1.0,
+    "low": 0.3,
+}
+
+
 class AnimeEntry(NamedTuple):
     mal_id: int
     title: str
@@ -71,6 +79,7 @@ class AnimeEntry(NamedTuple):
     genres: str
     score: float | None
     local_image_path: str | None
+    weight: float = 1.0  # from Worth Level column; 1.0 if not present
 
 
 def _load_title_map() -> dict[int, dict]:
@@ -232,10 +241,34 @@ def _resolve_dataframe(df: pd.DataFrame) -> list[AnimeEntry]:
         )
 
     print(f"  [input_parser] Using column '{title_col}' as anime titles.")
+
+    # ── 4. Detect optional Worth Level column ────────────────────────────────
+    WORTH_KEYWORDS = ["worth", "priority", "rating", "tier", "rank"]
+    worth_col = None
+    for keyword in WORTH_KEYWORDS:
+        for col in df.columns:
+            if keyword in col:
+                worth_col = col
+                break
+        if worth_col:
+            break
+
+    if worth_col:
+        print(f"  [input_parser] Found worth/priority column: '{worth_col}' — weighting embeddings.")
+
     titles = df[title_col].dropna().astype(str).str.strip().tolist()
-    # Drop empty strings
-    titles = [t for t in titles if t and t.lower() != 'nan']
-    return _resolve_titles(titles)
+    # Build (title, weight) pairs
+    worth_series = df[worth_col].astype(str).str.strip().str.lower() if worth_col else None
+    title_weight_pairs = []
+    for i, t in enumerate(df[title_col].astype(str).str.strip()):
+        if not t or t.lower() == 'nan':
+            continue
+        w = 1.0
+        if worth_series is not None:
+            raw = worth_series.iloc[i] if i < len(worth_series) else "medium"
+            w = WORTH_WEIGHTS.get(raw, 1.0)
+        title_weight_pairs.append((t, w))
+    return _resolve_titles_weighted(title_weight_pairs)
 
 
 def _resolve_by_ids(mal_ids: list[int]) -> list[AnimeEntry]:
@@ -252,6 +285,7 @@ def _resolve_by_ids(mal_ids: list[int]) -> list[AnimeEntry]:
                 genres=info["genres"],
                 score=info["score"],
                 local_image_path=info["local_image_path"],
+                weight=1.0,
             ))
         else:
             print(f"  [input_parser] WARNING: mal_id {mid} not found in DB.")
@@ -259,11 +293,17 @@ def _resolve_by_ids(mal_ids: list[int]) -> list[AnimeEntry]:
 
 
 def _resolve_titles(titles: list[str]) -> list[AnimeEntry]:
+    """Resolve a plain list of title strings (all weight=1.0)."""
+    return _resolve_titles_weighted([(t, 1.0) for t in titles])
+
+
+def _resolve_titles_weighted(title_weight_pairs: list[tuple[str, float]]) -> list[AnimeEntry]:
+    """Resolve titles and attach per-entry weights from Worth Level."""
     title_map = _load_title_map()
     results = []
     seen_ids = set()
 
-    for query in titles:
+    for query, weight in title_weight_pairs:
         result = _fuzzy_match(query, title_map)
         if result is None:
             print(f"  [input_parser] WARNING: No match found for '{query}' (threshold={FUZZY_THRESHOLD})")
@@ -275,8 +315,9 @@ def _resolve_titles(titles: list[str]) -> list[AnimeEntry]:
         seen_ids.add(match.mal_id)
 
         display_title = match.title_english or match.title
-        print(f"  [input_parser] '{query}' → '{display_title}' (mal_id={match.mal_id}, score={score:.0f})")
-        results.append(match)
+        weight_tag = f", weight={weight:.1f}" if weight != 1.0 else ""
+        print(f"  [input_parser] '{query}' → '{display_title}' (mal_id={match.mal_id}, score={score:.0f}{weight_tag})")
+        results.append(match._replace(weight=weight))
 
     return results
 

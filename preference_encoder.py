@@ -13,7 +13,7 @@ import torch
 from transformers import CLIPProcessor, CLIPModel
 
 # Local model path — download once with: python download_model.py
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-base-patch32")
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
 
 # ── Full MAL genre / theme / demographic list ────────────────────────────────
 MAL_GENRES = [
@@ -152,7 +152,7 @@ def _get_clip():
 
 def encode_preference_text(preference_text: str) -> np.ndarray:
     """
-    Encode the preference string as a 512-d CLIP text embedding (L2-normalised).
+    Encode the preference string as a 768-d CLIP text embedding (L2-normalised).
     Used for visual-mood matching alongside the image embeddings.
     """
     model, processor = _get_clip()

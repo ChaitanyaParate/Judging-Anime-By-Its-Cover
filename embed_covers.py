@@ -19,8 +19,8 @@ COVERS_DIR = "covers"
 EMBEDDINGS_PATH = "cover_embeddings.npy"
 INDEX_PATH = "embedding_index.json"
 # Local model path — download once with: python download_model.py
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-base-patch32")
-BATCH_SIZE = 256  # images per GPU batch
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
+BATCH_SIZE = 64  # reduced from 256 — large model needs ~3× more VRAM per image
 
 # ── Device selection (GPU preferred, CPU fallback) ───────────────────────────
 if torch.cuda.is_available() and os.environ.get("FORCE_CPU") != "1":

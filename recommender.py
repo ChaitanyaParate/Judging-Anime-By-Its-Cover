@@ -25,16 +25,16 @@ DB_PATH = "anime_data.db"
 EMBEDDINGS_PATH = "cover_embeddings.npy"
 INDEX_PATH = "embedding_index.json"
 # Local model path — download once with: python download_model.py
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-base-patch32")
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
 
 # Blending weights
 W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
 # Final score weights
-W_SIM = 0.60
-W_SCORE = 0.25
-W_POP = 0.15
+W_SIM = 0.55
+W_SCORE = 0.28
+W_POP = 0.17
 
 # Minimum score threshold for candidates
 MIN_SCORE = 5.5
@@ -80,7 +80,7 @@ def _load_index():
             f"to precompute CLIP embeddings for all cover images."
         )
 
-    _embeddings_matrix = np.load(EMBEDDINGS_PATH)  # [N, 512]
+    _embeddings_matrix = np.load(EMBEDDINGS_PATH)  # [N, D] where D=768 for large model
     with open(INDEX_PATH, "r") as f:
         _index = json.load(f)  # {str(mal_id): row_idx}
     _reverse_index = {v: int(k) for k, v in _index.items()}
@@ -208,8 +208,27 @@ def recommend(
         raise ValueError("Could not obtain embeddings for any liked anime. "
                          "Check that cover images exist and embed_covers.py has been run.")
 
-    # ── 2. User taste vector ──────────────────────────────────────────────────
-    taste_vec = np.mean(liked_vecs, axis=0)  # mean of liked embeddings
+    # ── 2. User taste vector (weighted by Worth Level if available) ───────────
+    weights = np.array([entry.weight for entry in liked_anime
+                        if _get_embedding_for_entry(entry) is not None], dtype=np.float32)
+    # Re-collect only entries that produced valid embeddings
+    valid_entries = [entry for entry in liked_anime
+                    if _get_embedding_for_entry(entry) is not None]
+    valid_weights = np.array([e.weight for e in valid_entries], dtype=np.float32)
+
+    if valid_weights.sum() == 0:
+        valid_weights = np.ones(len(liked_vecs), dtype=np.float32)
+
+    if len(set(valid_weights.tolist())) == 1:
+        # All weights equal — use simple mean (faster)
+        taste_vec = np.mean(liked_vecs, axis=0)
+    else:
+        # Weighted mean: High-worth anime dominate the query vector
+        taste_vec = np.average(liked_vecs, axis=0, weights=valid_weights)
+        n_high = int((valid_weights > 1.0).sum())
+        n_low  = int((valid_weights < 1.0).sum())
+        print(f"  [recommender] Weighted query: {n_high} High, "
+              f"{len(liked_vecs)-n_high-n_low} Medium, {n_low} Low entries")
     taste_vec = taste_vec / (np.linalg.norm(taste_vec) + 1e-9)  # re-normalise
 
     # ── 3. Blend with preference text embedding ───────────────────────────────
@@ -261,7 +280,7 @@ def recommend(
         if genre_filter and info["genres"]:
             anime_genres = {g.strip() for g in info["genres"].split(",")}
             overlap = len(anime_genres & genre_filter)
-            genre_boost = min(overlap * 0.05, 0.20)  # max +0.20 boost
+            genre_boost = min(overlap * 0.0625, 0.25)  # max +0.25 boost
 
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range

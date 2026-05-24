@@ -2,7 +2,7 @@
 # Cover images (2.6 GB) — download via mal_scraper.py
 covers/
 
-# CLIP model weights (578 MB) — download via download_model.py
+# CLIP model weights (~1.2 GB) — download once with: python download_model.py
 models/
 
 # Pre-computed CLIP embeddings (59 MB) — generated via embed_covers.py
@@ -16,6 +16,7 @@ anime_data.db
 results/
 plots/
 *.log
+nohup.out
 
 # ── Python environment ────────────────────────────────────────────────────────
 venv/
