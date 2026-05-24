@@ -100,7 +100,12 @@ def process_page_data(anime_list, cursor, conn):
         members = anime.get('members')
         
         genres_list = [g.get('name') for g in anime.get('genres', [])]
-        genres = ", ".join(genres_list)
+        # Include MAL Themes (Isekai, Time Travel, Psychological, Military...)
+        # and Demographics (Shounen, Seinen...) which Jikan returns separately
+        themes_list = [t.get('name') for t in anime.get('themes', [])]
+        demographics_list = [d.get('name') for d in anime.get('demographics', [])]
+        all_tags = genres_list + themes_list + demographics_list
+        genres = ", ".join(dict.fromkeys(all_tags))  # deduplicate, preserve order
         
         # Get large image if available, else normal
         images = anime.get('images', {}).get('jpg', {})

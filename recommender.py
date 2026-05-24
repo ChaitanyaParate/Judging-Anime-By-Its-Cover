@@ -31,14 +31,20 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", 
 W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
-# Final score weights
-W_SIM = 0.55
-W_SCORE = 0.28
-W_POP = 0.17
+# Final score weights  (must sum to 1.0)
+W_SIM = 0.45    # visual cover similarity
+W_SCORE = 0.28  # MAL community score
+W_POP = 0.17    # MAL member count (popularity)
+W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
+
 
 # Minimum score threshold for candidates
 MIN_SCORE = 5.5
 MIN_SCORED_BY = 500
+
+# MMR diversity weight (0 = pure relevance, 1 = pure diversity)
+# 0.40 means: 60% relevance + 40% penalise similarity to already-picked results
+MMR_LAMBDA = 0.40
 
 
 # ── Lazy CLIP loader ──────────────────────────────────────────────────────────
@@ -275,28 +281,62 @@ def recommend(
         if info["scored_by"] < MIN_SCORED_BY:
             continue
 
-        # Genre soft-boost
-        genre_boost = 0.0
+        # Genre relevance: normalized 0→1 score
+        # = matched_genres / requested_genres
+        # Toradora! for 'horror' →0.0, BTOOOM! for 'survival' →0.33, full match →1.0
+        genre_relevance = 0.0
         if genre_filter and info["genres"]:
             anime_genres = {g.strip() for g in info["genres"].split(",")}
             overlap = len(anime_genres & genre_filter)
-            genre_boost = min(overlap * 0.0625, 0.25)  # max +0.25 boost
+            genre_relevance = overlap / len(genre_filter)  # 0.0 to 1.0
 
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range
         norm_pop = info["members"] / members_max
         vis_sim = float(masked_sims[row_idx])
 
-        final = W_SIM * vis_sim + W_SCORE * norm_score + W_POP * norm_pop + genre_boost
+        final = W_SIM * vis_sim + W_SCORE * norm_score + W_POP * norm_pop + W_GENRE * genre_relevance
 
         candidates.append((final, vis_sim, mal_id, info))
 
     # Sort by final score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
 
-    # ── 8. Build results ──────────────────────────────────────────────────────
+    # ── 8. MMR diversity re-ranking ───────────────────────────────────────────
+    # Pre-seed with the query vector so even the first pick is penalised for
+    # being too close to the taste centroid (prevents Toradora!/Charlotte bias).
+    selected: list[tuple] = []
+    remaining = list(candidates)
+    selected_embs: list[np.ndarray] = [query_vec]  # seed: the query itself
+
+    while len(selected) < top_n and remaining:
+        best_mmr_score = -float("inf")
+        best_idx = 0
+
+        for i, (final, vis_sim, mid, info) in enumerate(remaining):
+            if str(mid) in _index:
+                cand_emb = _embeddings_matrix[_index[str(mid)]]
+                max_sim_to_selected = max(
+                    float(cand_emb @ s) for s in selected_embs
+                )
+            else:
+                max_sim_to_selected = 0.0
+
+            mmr_score = (1 - MMR_LAMBDA) * final - MMR_LAMBDA * max_sim_to_selected
+            if mmr_score > best_mmr_score:
+                best_mmr_score = mmr_score
+                best_idx = i
+
+        chosen = remaining.pop(best_idx)
+        selected.append(chosen)
+        _, _, chosen_mid, _ = chosen
+        if str(chosen_mid) in _index:
+            selected_embs.append(_embeddings_matrix[_index[str(chosen_mid)]])
+
+
+    # ── 9. Build results ──────────────────────────────────────────────────────
     results = []
-    for rank, (final, vis_sim, mal_id, info) in enumerate(candidates[:top_n], start=1):
+    for rank, (final, vis_sim, mal_id, info) in enumerate(selected, start=1):
         results.append(Recommendation(
             rank=rank,
             mal_id=mal_id,

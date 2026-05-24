@@ -271,8 +271,13 @@ Examples:
     console.rule("[bold cyan]Step 3 — Finding Recommendations[/]")
     console.print(f"  Running CLIP similarity search over 30k anime covers...\n")
 
-    # Auto-scale candidates: base + enough to absorb the entire input list
-    n_candidates = args.candidates if args.candidates > 0 else max(300, args.top_n + len(liked_anime) + 100)
+    # Auto-scale candidates: base + enough to absorb the entire input list.
+    # When a genre filter is active, fetch 3× more candidates so genre-tagged
+    # anime deeper in visual similarity still get a chance to compete.
+    base_candidates = max(300, args.top_n + len(liked_anime) + 100)
+    genre_multiplier = 3 if genre_filter else 1
+    n_candidates = args.candidates if args.candidates > 0 else base_candidates * genre_multiplier
+
     console.print(f"  [dim]Fetching top {n_candidates} visual candidates before filtering...[/]\n")
 
     try:
