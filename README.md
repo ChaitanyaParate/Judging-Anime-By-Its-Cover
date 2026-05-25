@@ -1,6 +1,6 @@
 # 🎌 Judging Anime By Its Cover
 
-A multimodal anime recommendation engine that uses **CLIP visual embeddings** to find anime with similar art styles and aesthetic vibes, blended with free-text mood preferences.
+A multimodal anime recommendation engine that uses **CLIP visual embeddings** to find anime with similar art styles and aesthetic vibes, blended with free-text mood preferences and a **genre co-occurrence correlation system**.
 
 > *"Don't judge a book by its cover" — but we absolutely will judge anime by theirs.*
 
@@ -12,8 +12,10 @@ A multimodal anime recommendation engine that uses **CLIP visual embeddings** to
 2. **The system** builds a *visual taste vector* from the cover images of your watched anime using CLIP
 3. **Worth Level weighting** (optional) — High-rated anime influence the query 5× more than Low-rated ones
 4. **Searched against** 30,000+ anime cover embeddings via cosine similarity
-5. **Re-ranked** by MAL score, popularity, and genre match
-6. **Post-filtered** to exclude anything already in your watched list
+5. **Genre injection** — anime matching your requested genres are pulled directly into the candidate pool, even if they don't visually resemble your average taste
+6. **Genre relevance scored** using a co-occurrence correlation table built from 30k anime — soft-matching related genres (e.g. `Suspense` and `Psychological` both score high for "horror")
+7. **Re-ranked** by visual similarity, MAL score, popularity, and genre relevance
+8. **Post-filtered** to exclude anything already in your watched list
 
 ---
 
@@ -25,6 +27,9 @@ python recommend.py --input Ani.csv --preference "dark psychological"
 
 # Using terminal input
 python recommend.py --input "Death Note, Code Geass, Monster" --preference "mind games thriller"
+
+# Multi-genre cross-filtering
+python recommend.py --input Ani.csv --preference "Romance Horror" --top-n 10
 
 # More recommendations
 python recommend.py --input Ani.csv --preference "wholesome romance" --top-n 10
@@ -149,12 +154,28 @@ python recommend.py --input "Naruto, Bleach, One Piece" --preference "long shone
 
 | Component | Weight | Description |
 |---|---|---|
-| Visual Match | 55% | CLIP cosine similarity of cover aesthetics |
+| Visual Match | 45% | CLIP cosine similarity of cover aesthetics |
 | MAL Score | 28% | Community rating from MyAnimeList |
 | Popularity | 17% | Number of MAL members |
-| Genre Bonus | +0.25 max | Flat boost if genres match your preference |
+| Genre Relevance | 25% | Co-occurrence correlation score (0 if below threshold) |
 
-The **query vector** itself is: `70% visual taste + 30% CLIP text embedding of your preference`
+The **query vector** is: `70% visual taste + 30% CLIP text embedding of your preference`
+
+### 🔗 Genre Relevance Scoring
+
+Genre matching goes beyond exact tag lookup. The system builds a **co-occurrence correlation table** from all 30k anime in the database:
+
+- `corr[(G, F)]` = P(genre G | genre F) — how often genre G appears when genre F is present
+- For each requested genre, all of the anime's genres contribute a soft correlation score
+- Scores are normalized per anime and aggregated using **geometric mean** across requested genres — so an anime must score reasonably on **all** requested genres, not just one
+- Anime scoring below `0.13` are hard-zeroed (no genre contribution to final score)
+
+**Demographic genres** (Josei, Seinen, Shoujo, Shounen, Kids) use the **reversed** correlation direction — asking "given this anime has Drama, how likely is it to be Josei?" rather than "what genres appear in Josei anime?", which prevents pure Drama/Romance anime from incorrectly scoring high.
+
+**Genre injection** ensures niche genre anime (e.g. Josei, Racing) always enter the candidate pool even if they look visually different from the user's average taste.
+
+### Supported preference keywords (examples)
+`horror`, `isekai`, `mind games`, `thriller`, `romance`, `sports`, `competition`, `mecha`, `military`, `vampire`, `psychological`, `slice of life`, `sci-fi`, `josei`, `seinen`, `shounen`, `ecchi`, `cars/racing`, `surreal/dementia`, `police`, `samurai`, `yaoi`, `yuri`, and more.
 
 ---
 
@@ -179,6 +200,7 @@ If you want to refresh the anime database or scrape new entries:
 python mal_scraper.py --all        # full scrape (slow, ~30k anime)
 python mal_scraper.py --missing    # only fill in missing entries
 ```
+This automatically rebuilds `genre_correlation.json` after scraping.  
 Then re-run `embed_covers.py` to update the embeddings.
 
 ---
@@ -212,3 +234,4 @@ Then re-run `embed_covers.py` to update the embeddings.
 ## 📄 License
 
 MIT License — see [LICENSE](LICENSE)
+
